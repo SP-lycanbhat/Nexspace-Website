@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  nexspace-frontend:
+    image: nexspace-frontend:latest
+    container_name: nexspace-frontend
+    restart: unless-stopped
+    networks:
+      - nexspace-net
+
+  nexspace-tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: nexspace-tunnel
+    restart: unless-stopped
+    command: tunnel --config /etc/cloudflared/config.yml run nexspace-tunnel
+    volumes:
+      - ./.cloudflared:/etc/cloudflared
+    networks:
+      - nexspace-net
+
+networks:
+  nexspace-net:
+    name: nexspace-net
