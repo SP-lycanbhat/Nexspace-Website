@@ -1,54 +1,74 @@
-#!/bin/bash
+#!/usr/bin/expect -f
 
-# 🚀 Nexspace Website Server-Side Deployment Script
+# 🚀 Nexspace Website Full Remote Deployment Script (Client-Side)
 # URL: nexspace.spatiumoffices.com
 
-set -e
+set timeout -1
 
-echo "----------------------------------------------------"
-echo "🚀 Deploying Nexspace Website on Remote Server"
-echo "----------------------------------------------------"
+# Configuration
+set server "zigbee@172.168.10.251"
+set pass "spatium123@abc"
+set target_dir "/home/zigbee/Nexspace-Website"
 
-PASS="spatium123@abc"
-TARGET_DIR="$(pwd)"
+puts "----------------------------------------------------"
+puts "🚀 Starting Remote Deployment to $server"
+puts "----------------------------------------------------"
 
-echo "----------------------------------------------------"
-echo "🔧 Setup Started in $TARGET_DIR"
-echo "----------------------------------------------------"
+# 1. Sync Files
+puts "� Syncing files to remote server..."
+spawn rsync -avz --delete \
+    --exclude "node_modules" \
+    --exclude ".git" \
+    --exclude "dist" \
+    --exclude ".cloudflared" \
+    ./ "$server:$target_dir/"
 
-CLOUDFLARED_DIR="$TARGET_DIR/.cloudflared"
-mkdir -p "$CLOUDFLARED_DIR"
+expect {
+    "password:" {
+        send "$pass\n"
+        exp_continue
+    }
+    eof
+}
 
-# Cloudflare Tunnel Setup (Idempotent)
-TUNNEL_NAME="nexspace-tunnel"
+# 2. Execute Remote Setup Server-Side
+puts "🐳 Running remote setup and Docker build..."
+spawn ssh -o StrictHostKeyChecking=no "$server" "bash -s"
+expect "password:"
+send "$pass\n"
 
-# Ensure user is logged in
-if [ ! -f "$HOME/.cloudflared/cert.pem" ]; then
-    echo "🔑 Please login to Cloudflare first on the server by running: cloudflared tunnel login"
-fi
+expect "$ "
+send "cd $target_dir\n"
 
-# Create tunnel if not exists
-if ! cloudflared tunnel list | grep -q "$TUNNEL_NAME"; then
-    echo "☁️ Creating new Cloudflare Tunnel: $TUNNEL_NAME..."
-    cloudflared tunnel create "$TUNNEL_NAME"
-fi
+# Define the massive remote script block
+set script {
+    set -e
+    PASS="spatium123@abc"
+    TARGET_DIR="$(pwd)"
+    CLOUDFLARED_DIR="$TARGET_DIR/.cloudflared"
 
-# Get Tunnel ID and Credentials
-TUNNEL_ID=$(cloudflared tunnel list | awk -v name="$TUNNEL_NAME" '$2 == name {print $1}')
+    echo "� Setting up Cloudflare tunnel in $TARGET_DIR..."
+    mkdir -p "$CLOUDFLARED_DIR"
 
-if [ -z "$TUNNEL_ID" ]; then
-    echo "❌ Error: Could not find Tunnel ID for '$TUNNEL_NAME'."
-    exit 1
-fi
+    TUNNEL_NAME="nexspace-tunnel"
 
-echo "✅ Using Tunnel ID: $TUNNEL_ID"
+    if ! cloudflared tunnel list | grep -q "$TUNNEL_NAME"; then
+        echo "☁️ Creating new Cloudflare Tunnel: $TUNNEL_NAME..."
+        cloudflared tunnel create "$TUNNEL_NAME"
+    fi
 
-if [ -f "$HOME/.cloudflared/$TUNNEL_ID.json" ]; then
-    echo "🔑 Preparing tunnel configuration..."
-    echo "$PASS" | sudo -S mkdir -p "$CLOUDFLARED_DIR"
-    echo "$PASS" | sudo -S cp "$HOME/.cloudflared/$TUNNEL_ID.json" "$CLOUDFLARED_DIR/credentials.json"
-    
-    echo "$PASS" | sudo -S tee "$CLOUDFLARED_DIR/config.yml" > /dev/null <<CONF
+    TUNNEL_ID=$(cloudflared tunnel list | awk -v name="$TUNNEL_NAME" '$2 == name {print $1}')
+
+    if [ -z "$TUNNEL_ID" ]; then
+        echo "❌ Error: Could not find Tunnel ID."
+        exit 1
+    fi
+
+    if [ -f "$HOME/.cloudflared/$TUNNEL_ID.json" ]; then
+        echo "$PASS" | sudo -S mkdir -p "$CLOUDFLARED_DIR"
+        echo "$PASS" | sudo -S cp "$HOME/.cloudflared/$TUNNEL_ID.json" "$CLOUDFLARED_DIR/credentials.json"
+        
+        echo "$PASS" | sudo -S tee "$CLOUDFLARED_DIR/config.yml" > /dev/null <<CONF
 tunnel: $TUNNEL_ID
 credentials-file: /etc/cloudflared/credentials.json
 
@@ -58,36 +78,36 @@ ingress:
   - service: http_status:404
 CONF
 
-    # Fix permissions
-    echo "$PASS" | sudo -S chown -R 65532:65532 "$CLOUDFLARED_DIR"
-    echo "$PASS" | sudo -S chmod -R 700 "$CLOUDFLARED_DIR"
-else
-    echo "❌ Error: Credentials file not found at $HOME/.cloudflared/$TUNNEL_ID.json"
-    exit 1
-fi
+        echo "$PASS" | sudo -S chown -R 65532:65532 "$CLOUDFLARED_DIR"
+        echo "$PASS" | sudo -S chmod -R 700 "$CLOUDFLARED_DIR"
+    else
+        echo "❌ Error: Credentials file missing."
+        exit 1
+    fi
 
-echo "🔗 Routing DNS..."
-cloudflared tunnel route dns -f "$TUNNEL_ID" nexspace.spatiumoffices.com || true
+    cloudflared tunnel route dns -f "$TUNNEL_ID" nexspace.spatiumoffices.com || true
 
-echo "🐳 Building and starting Docker containers..."
+    echo "🐳 Building Docker images..."
+    export TMPDIR="$TARGET_DIR"
+    export BUILDX_NO_DEFAULT_ATTESTATIONS=1
+    export BUILDX_NO_DEFAULT_PROVENANCE=1
+    export DOCKER_BUILDKIT=1
 
-export TMPDIR="$TARGET_DIR"
-export BUILDX_NO_DEFAULT_ATTESTATIONS=1
-export BUILDX_NO_DEFAULT_PROVENANCE=1
-export DOCKER_BUILDKIT=1
+    echo "$PASS" | sudo -S -E docker compose down || true
+    echo "$PASS" | sudo -S -E docker build -t nexspace-frontend . --provenance=false
+    echo "$PASS" | sudo -S -E docker compose up -d
 
-echo "🧹 Cleaning up current project containers..."
-echo "$PASS" | sudo -S -E docker compose down || true
+    echo "✨ Deployment Remote Success!"
+    echo "$PASS" | sudo -S docker ps --filter "name=nexspace"
+}
 
-echo "📦 Building Frontend..."
-echo "$PASS" | sudo -S -E docker build -t nexspace-frontend . --provenance=false
+# Send the script body
+send "$script\n"
 
-echo "🚀 Starting containers..."
-echo "$PASS" | sudo -S -E docker compose up -d
+# Trigger execution and wait for it to process
+send "exit\n"
+expect eof
 
-echo "----------------------------------------------------"
-echo "✨ Deployment Success!"
-echo "📍 Access your app at: https://nexspace.spatiumoffices.com"
-echo "----------------------------------------------------"
-echo "📊 Current Status:"
-echo "$PASS" | sudo -S docker ps --filter "name=nexspace"
+puts "----------------------------------------------------"
+puts "✅ Client-Side Script Complete."
+puts "----------------------------------------------------"
